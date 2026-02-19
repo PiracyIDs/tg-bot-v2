@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "tg-file-storage-bot"
+version = "2.0.0"
+description = "Telegram File Storage Bot with MongoDB metadata"
+requires-python = ">=3.9"
+dependencies = [
+    "aiogram==3.7.0",
+    "motor==3.4.0",
+    "pymongo==4.6.0",
+    "python-dotenv==1.0.0",
+    "pydantic==2.6.0",
+    "pydantic-settings==2.2.0",
+]
+
+[tool.setuptools.packages.find]
+# Tells setuptools that 'bot' (and sub-packages) live at the project root
+where = ["."]
+include = ["bot*"]
+
+[tool.setuptools]
+# Explicit root so `pip install -e .` works correctly
+package-dir = {"" = "."}
