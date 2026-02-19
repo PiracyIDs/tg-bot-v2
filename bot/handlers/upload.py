@@ -24,10 +24,20 @@ MEDIA_FILTER = (
 )
 
 
+def is_admin(user_id: int) -> bool:
+    """Check if user is an admin."""
+    return user_id in settings.admin_user_ids
+
+
 @router.message(MEDIA_FILTER)
 async def handle_file_upload(message: Message, bot: Bot) -> None:
     user = message.from_user
     logger.info("Upload from user %s (%s)", user.id, user.username)
+
+    # Admin-only upload restriction
+    if not is_admin(user.id):
+        await message.answer("⛔ <b>Uploads are restricted to admins only.</b>", parse_mode="HTML")
+        return
 
     db = get_db()
     file_repo = FileRepository(db)
@@ -51,10 +61,10 @@ async def handle_file_upload(message: Message, bot: Bot) -> None:
         )
         return
 
-    # ── Feature 2: Quota enforcement ──────────────────────────────────────────
+    # ── Feature 2: Quota enforcement (admins bypass) ───────────────────────────
     effective_size = file_size or 0
     allowed, quota = await quota_repo.can_upload(user.id, effective_size)
-    if not allowed:
+    if not allowed and not is_admin(user.id):
         await message.answer(
             f"🚫 <b>Storage quota exceeded!</b>\n\n"
             f"📦 Used: {format_size(quota.used_bytes)} / {format_size(quota.quota_bytes)}\n"
