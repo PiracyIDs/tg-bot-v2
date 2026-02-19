@@ -26,6 +26,10 @@ HELP_TEXT = (
     "/share <code>&lt;file_id&gt;</code> — Generate a share code\n"
     "/claim <code>&lt;code&gt;</code> — Claim a file shared by someone\n\n"
 
+    "<b>🔐 Token Verification</b>\n"
+    "/settoken — Set your download verification token\n"
+    "/verify — Verify token to enable downloads (30-min session)\n\n"
+
     "<b>📊 Account</b>\n"
     "/mystats — View your storage quota usage\n"
     "/delete <code>&lt;file_id&gt;</code> — Delete a file\n\n"
@@ -33,7 +37,8 @@ HELP_TEXT = (
     "<b>💡 Tips</b>\n"
     "• After uploading, use the action buttons to tag, rename, share, or set expiry.\n"
     "• Duplicate files are detected automatically.\n"
-    "• Files can be set to auto-expire after 1, 7, or 30 days."
+    "• Files can be set to auto-expire after 1, 7, or 30 days.\n"
+    "• Non-admins must verify their token before downloading."
 )
 
 
