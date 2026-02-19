@@ -84,3 +84,34 @@ class QuotaRepository:
         """Admin: list all user quota records."""
         cursor = self.col.find({}).sort("used_bytes", -1)
         return [UserQuotaRecord(**d) for d in await cursor.to_list(500)]
+
+    async def set_download_token(self, user_id: int, token: str) -> None:
+        """Set user's download verification token."""
+        await self.col.update_one(
+            {"user_id": user_id},
+            {"$set": {"download_token": token, "updated_at": datetime.now(timezone.utc)}},
+            upsert=True,
+        )
+
+    async def get_download_token(self, user_id: int) -> Optional[str]:
+        """Get user's download verification token."""
+        doc = await self.col.find_one({"user_id": user_id})
+        return doc.get("download_token") if doc else None
+
+    async def set_token_verified(self, user_id: int, until: datetime) -> None:
+        """Mark user's token as verified until given datetime."""
+        await self.col.update_one(
+            {"user_id": user_id},
+            {"$set": {"token_verified_until": until, "updated_at": datetime.now(timezone.utc)}},
+            upsert=True,
+        )
+
+    async def is_token_verified(self, user_id: int) -> bool:
+        """Check if user's token is currently verified."""
+        doc = await self.col.find_one({"user_id": user_id})
+        if not doc:
+            return False
+        verified_until = doc.get("token_verified_until")
+        if not verified_until:
+            return False
+        return verified_until > datetime.now(timezone.utc)

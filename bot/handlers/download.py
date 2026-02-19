@@ -8,6 +8,8 @@ Download / retrieval handlers:
   /rename <id>    — rename a file
   /delete <id>    — delete a file record
   /mystats        — show quota usage
+  /settoken       — set your download verification token
+  /verify         — verify token to enable downloads
 
 Callback handlers for the inline keyboards.
 """
@@ -19,6 +21,7 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
+from bot.config import settings
 from bot.database.connection import get_db
 from bot.database.repositories.file_repo import FileRepository
 from bot.database.repositories.quota_repo import QuotaRepository
@@ -29,11 +32,15 @@ from bot.utils.keyboards import (
     build_file_action_keyboard,
     build_file_list_keyboard,
 )
-from bot.utils.states import RenameStates, TagStates
+from bot.utils.states import RenameStates, TagStates, TokenStates
 
 logger = logging.getLogger(__name__)
 router = Router(name="download")
 PAGE_SIZE = 8
+
+
+def is_admin(user_id: int) -> bool:
+    return user_id in settings.admin_user_ids
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -75,6 +82,26 @@ async def _deliver_file(
 
 @router.message(Command("get"))
 async def cmd_get_file(message: Message, bot: Bot) -> None:
+    user_id = message.from_user.id
+
+    if not is_admin(user_id):
+        quota_repo = QuotaRepository(get_db())
+        if not await quota_repo.is_token_verified(user_id):
+            stored_token = await quota_repo.get_download_token(user_id)
+            if not stored_token:
+                await message.answer(
+                    "🔐 <b>Token required for downloads.</b>\n\n"
+                    "Use /settoken to set your download token first.",
+                    parse_mode="HTML",
+                )
+                return
+            await message.answer(
+                "🔐 <b>Token verification required.</b>\n\n"
+                "Use /verify to verify your token before downloading.",
+                parse_mode="HTML",
+            )
+            return
+
     args = message.text.split(maxsplit=1)
     if len(args) < 2:
         await message.answer("Usage: /get <code>&lt;file_id&gt;</code>", parse_mode="HTML")
@@ -148,9 +175,21 @@ async def cb_noop(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data.startswith("get:"))
 async def cb_get_file(callback: CallbackQuery, bot: Bot) -> None:
+    user_id = callback.from_user.id
+
+    if not is_admin(user_id):
+        quota_repo = QuotaRepository(get_db())
+        if not await quota_repo.is_token_verified(user_id):
+            stored_token = await quota_repo.get_download_token(user_id)
+            if not stored_token:
+                await callback.answer("🔐 Set a token with /settoken first.", show_alert=True)
+                return
+            await callback.answer("🔐 Verify your token with /verify first.", show_alert=True)
+            return
+
     record_id = callback.data.split(":", 1)[1]
     await callback.answer("📥 Sending…")
-    err = await _deliver_file(bot, callback.message.chat.id, record_id, callback.from_user.id)
+    err = await _deliver_file(bot, callback.message.chat.id, record_id, user_id)
     if err:
         await callback.message.answer(err, parse_mode="HTML")
 
@@ -502,3 +541,86 @@ async def cmd_mystats(message: Message) -> None:
         f"[{bar}] {pct_str}",
         parse_mode="HTML",
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Token verification for non-admin downloads
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.message(Command("settoken"))
+async def cmd_settoken(message: Message, state: FSMContext) -> None:
+    """Set your download verification token."""
+    if is_admin(message.from_user.id):
+        await message.answer("ℹ️ Admins don't need a token — you can download freely.")
+        return
+
+    await state.set_state(TokenStates.waiting_for_new_token)
+    await message.answer(
+        "🔐 <b>Set Download Token</b>\n\n"
+        "Send me a token (password) that you'll need to enter before downloading files.\n\n"
+        "⚠️ Choose something memorable — you'll need this every time you download.",
+        parse_mode="HTML",
+    )
+
+
+@router.message(TokenStates.waiting_for_new_token)
+async def process_new_token(message: Message, state: FSMContext) -> None:
+    token = message.text.strip()
+    if len(token) < 4:
+        await message.answer("❌ Token must be at least 4 characters. Try again:")
+        return
+
+    quota_repo = QuotaRepository(get_db())
+    await quota_repo.set_download_token(message.from_user.id, token)
+    await state.clear()
+    await message.answer(
+        "✅ <b>Token set successfully!</b>\n\n"
+        f"Your download token is: <code>{token}</code>\n\n"
+        "Use /verify before downloading files.",
+        parse_mode="HTML",
+    )
+
+
+@router.message(Command("verify"))
+async def cmd_verify(message: Message, state: FSMContext) -> None:
+    """Verify your token to enable downloads."""
+    if is_admin(message.from_user.id):
+        await message.answer("ℹ️ Admins don't need token verification — you can download freely.")
+        return
+
+    quota_repo = QuotaRepository(get_db())
+    stored_token = await quota_repo.get_download_token(message.from_user.id)
+
+    if not stored_token:
+        await message.answer(
+            "❌ You haven't set a token yet.\n\nUse /settoken to set one first.",
+            parse_mode="HTML",
+        )
+        return
+
+    await state.set_state(TokenStates.waiting_for_token)
+    await state.update_data(stored_token=stored_token)
+    await message.answer("🔐 Send your download token to verify:", parse_mode="HTML")
+
+
+@router.message(TokenStates.waiting_for_token)
+async def process_token_verify(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    stored_token = data.get("stored_token")
+    user_token = message.text.strip()
+
+    await state.clear()
+
+    if user_token == stored_token:
+        from datetime import timedelta
+        quota_repo = QuotaRepository(get_db())
+        verified_until = datetime.now(timezone.utc) + timedelta(minutes=30)
+        await quota_repo.set_token_verified(message.from_user.id, verified_until)
+        await message.answer(
+            "✅ <b>Token verified!</b>\n\n"
+            "You can now download files for 30 minutes.\n"
+            "Use /get, /list, or tap files to download.",
+            parse_mode="HTML",
+        )
+    else:
+        await message.answer("❌ Incorrect token. Try /verify again.")

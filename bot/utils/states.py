@@ -11,3 +11,8 @@ class RenameStates(StatesGroup):
 
 class TagStates(StatesGroup):
     waiting_for_tags = State()
+
+
+class TokenStates(StatesGroup):
+    waiting_for_token = State()
+    waiting_for_new_token = State()

@@ -95,6 +95,8 @@ class UserQuotaRecord(BaseModel):
     used_bytes: int = 0              # Running total
     quota_bytes: int                 # Assigned limit (0 = unlimited)
     file_count: int = 0
+    download_token: Optional[str] = None  # Token required for non-admin downloads
+    token_verified_until: Optional[datetime] = None  # Token verification expiry
     updated_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc)
     )
