@@ -114,4 +114,7 @@ class QuotaRepository:
         verified_until = doc.get("token_verified_until")
         if not verified_until:
             return False
+        # Ensure both datetimes are timezone-aware for comparison
+        if verified_until.tzinfo is None:
+            verified_until = verified_until.replace(tzinfo=timezone.utc)
         return verified_until > datetime.now(timezone.utc)
