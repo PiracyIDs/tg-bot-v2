@@ -24,7 +24,6 @@ def is_admin(user_id: int) -> bool:
 @router.message(Command("admin"))
 async def cmd_admin(message: Message) -> None:
     if not is_admin(message.from_user.id):
-        # Silently ignore non-admins
         return
 
     db = get_db()
@@ -36,26 +35,22 @@ async def cmd_admin(message: Message) -> None:
     user_count = await file_repo.distinct_user_count()
     all_quotas = await quota_repo.all_quotas()
 
-    # Top 5 users by usage
-    top_users = sorted(all_quotas, key=lambda q: q.used_bytes, reverse=True)[:5]
+    top_users = sorted(all_quotas, key=lambda q: q.bandwidth_used, reverse=True)[:5]
     top_lines = []
     for i, q in enumerate(top_users, 1):
-        top_lines.append(
-            f"  {i}. User <code>{q.user_id}</code> — "
-            f"{format_size(q.used_bytes)} / "
-            f"{'∞' if q.is_unlimited else format_size(q.quota_bytes)} "
-            f"({q.file_count} files)"
-        )
+        bw_str = f"{format_size(q.bandwidth_used)} / {'∞' if q.is_unlimited else format_size(q.bandwidth_limit)}"
+        dl_str = f"{q.download_count} dl" + (f" / {q.download_limit}" if q.download_limit > 0 else "")
+        top_lines.append(f"  {i}. User <code>{q.user_id}</code> — {bw_str} ({dl_str})")
 
     await message.answer(
         f"🔧 <b>Admin Dashboard</b>\n\n"
         f"👥 Users: <b>{user_count}</b>\n"
         f"📁 Total files: <b>{total_files}</b>\n"
         f"💾 Total storage used: <b>{format_size(total_bytes)}</b>\n\n"
-        f"<b>Top users by storage:</b>\n"
+        f"<b>Top users by download bandwidth:</b>\n"
         + ("\n".join(top_lines) if top_lines else "  (none)") +
         f"\n\n<b>Admin commands:</b>\n"
-        f"/setquota <code>&lt;user_id&gt; &lt;mb&gt;</code> — set user quota\n"
+        f"/setquota <code>&lt;user_id&gt; &lt;bandwidth_mb&gt; [dl_limit]</code> — set download quota\n"
         f"/delfile <code>&lt;record_id&gt;</code> — force-delete any file\n"
         f"/userinfo <code>&lt;user_id&gt;</code> — view user stats",
         parse_mode="HTML",
@@ -64,30 +59,39 @@ async def cmd_admin(message: Message) -> None:
 
 @router.message(Command("setquota"))
 async def cmd_setquota(message: Message) -> None:
-    """Admin: /setquota <user_id> <mb>  (0 = unlimited)"""
+    """Admin: /setquota <user_id> <bandwidth_mb> [download_limit] (0 = unlimited)"""
     if not is_admin(message.from_user.id):
         return
 
     parts = message.text.split()
-    if len(parts) != 3:
-        await message.answer("Usage: /setquota <code>&lt;user_id&gt; &lt;mb&gt;</code>", parse_mode="HTML")
+    if len(parts) < 3:
+        await message.answer(
+            "Usage: /setquota <code>&lt;user_id&gt; &lt;bandwidth_mb&gt; [download_limit]</code>\n"
+            "Example: /setquota <code>12345678 500 50</code> — 500MB bandwidth, 50 downloads/day",
+            parse_mode="HTML"
+        )
         return
 
     try:
         target_user = int(parts[1])
-        quota_mb = int(parts[2])
+        bandwidth_mb = int(parts[2])
+        download_limit = int(parts[3]) if len(parts) > 3 else 0
     except ValueError:
-        await message.answer("❌ user_id and mb must be integers.")
+        await message.answer("❌ user_id, bandwidth_mb, and download_limit must be integers.")
         return
 
     repo = QuotaRepository(get_db())
-    await repo.set_quota(target_user, quota_mb)
-    label = "Unlimited" if quota_mb == 0 else f"{quota_mb} MB"
+    await repo.set_quota(target_user, bandwidth_mb, download_limit)
+    bw_label = "Unlimited" if bandwidth_mb == 0 else f"{bandwidth_mb} MB/day"
+    dl_label = "Unlimited" if download_limit == 0 else f"{download_limit}/day"
     await message.answer(
-        f"✅ Quota for user <code>{target_user}</code> set to <b>{label}</b>.",
+        f"✅ Download quota for user <code>{target_user}</code> set to:\n"
+        f"📦 Bandwidth: <b>{bw_label}</b>\n"
+        f"📊 Downloads: <b>{dl_label}</b>",
         parse_mode="HTML",
     )
-    logger.info("Admin %s set quota for user %s to %s MB", message.from_user.id, target_user, quota_mb)
+    logger.info("Admin %s set quota for user %s to %s MB, %s downloads", 
+                message.from_user.id, target_user, bandwidth_mb, download_limit)
 
 
 @router.message(Command("delfile"))
@@ -104,18 +108,15 @@ async def cmd_admin_delete(message: Message) -> None:
     record_id = parts[1].strip()
     db = get_db()
     file_repo = FileRepository(db)
-    quota_repo = QuotaRepository(db)
 
     record = await file_repo.get_by_id(record_id)
     if not record:
         await message.answer("❌ Record not found.")
         return
 
-    # Delete bypassing ownership
     from bson import ObjectId
     result = await file_repo.col.delete_one({"_id": ObjectId(record_id)})
     if result.deleted_count:
-        await quota_repo.remove_usage(record.user_id, record.file_size or 0)
         await message.answer(
             f"✅ Deleted record <code>{record_id}</code> (owner: {record.user_id}).",
             parse_mode="HTML",
@@ -126,7 +127,7 @@ async def cmd_admin_delete(message: Message) -> None:
 
 @router.message(Command("userinfo"))
 async def cmd_userinfo(message: Message) -> None:
-    """Admin: show a specific user's quota and recent files."""
+    """Admin: show a specific user's download quota and recent files."""
     if not is_admin(message.from_user.id):
         return
 
@@ -148,11 +149,16 @@ async def cmd_userinfo(message: Message) -> None:
     quota = await quota_repo.get(target_user)
     recent = await file_repo.list_by_user(target_user, page=1, page_size=5)
 
+    bw_label = "Unlimited" if quota.is_unlimited else format_size(quota.bandwidth_limit)
+    dl_label = "Unlimited" if quota.download_limit == 0 else str(quota.download_limit)
+    reset_str = quota.quota_reset_time.strftime('%Y-%m-%d %H:%M') if quota.quota_reset_time else "Not set"
+
     lines = [
         f"👤 <b>User</b> <code>{target_user}</code>\n",
-        f"Files: <b>{quota.file_count}</b>",
-        f"Used:  <b>{format_size(quota.used_bytes)}</b>",
-        f"Quota: <b>{'Unlimited' if quota.is_unlimited else format_size(quota.quota_bytes)}</b>\n",
+        f"📥 <b>Download Stats:</b>",
+        f"  Bandwidth: {format_size(quota.bandwidth_used)} / {bw_label}",
+        f"  Downloads: {quota.download_count}" + (f" / {quota.download_limit}" if quota.download_limit > 0 else ""),
+        f"  Reset at: {reset_str}\n",
         "<b>Recent files:</b>",
     ]
     for r in recent:

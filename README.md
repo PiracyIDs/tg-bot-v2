@@ -5,14 +5,14 @@ A feature-rich Telegram bot for storing and managing files in a private channel 
 ## Features
 
 - **Admin-only uploads** — Only designated admins can upload files
-- **Unlimited storage for admins** — Admins bypass quota restrictions
+- **Download quota system** — Per-user daily bandwidth and download count limits (resets at midnight UTC)
+- **Unlimited downloads for admins** — Admins bypass quota restrictions
 - **Token verification for downloads** — Non-admins must verify a token before downloading (30-min session)
 - **Duplicate detection** — Automatically detects if you've already uploaded a file
-- **Quota management** — Per-user storage limits (configurable)
 - **File organization** — Tags, rename, search by filename or tag
 - **File sharing** — Generate share codes for others to claim files
 - **Auto-expiry** — Set files to expire after 1, 7, or 30 days
-- **Admin dashboard** — View stats, manage quotas, delete any file
+- **Admin dashboard** — View stats, manage download quotas, delete any file
 
 ## Requirements
 
@@ -63,8 +63,10 @@ MONGO_DB_NAME=tg_file_storage
 ALLOWED_USER_IDS=           # Empty = open access for all users
 ADMIN_USER_IDS=123456789    # Comma-separated admin user IDs
 
-# Quota
-DEFAULT_QUOTA_MB=500        # Per-user quota in MB (0 = unlimited)
+# Quota (Download quota - resets daily at midnight UTC)
+DEFAULT_QUOTA_MB=500        # Legacy - kept for backward compatibility
+DEFAULT_BANDWIDTH_LIMIT_MB=500  # Daily bandwidth limit per user in MB (0 = unlimited)
+DEFAULT_DOWNLOAD_LIMIT=0    # Daily download count limit (0 = unlimited)
 
 # Auto-Expiry
 DEFAULT_EXPIRY_DAYS=0       # 0 = no auto-expiry
@@ -105,7 +107,7 @@ This starts both the bot and MongoDB container.
 | `/delete <id>` | Delete a file |
 | `/share <id>` | Generate a share code |
 | `/claim <code>` | Claim a shared file |
-| `/mystats` | View your storage quota |
+| `/mystats` | View your download quota usage |
 | `/settoken` | Set your download verification token |
 | `/verify` | Verify token to enable downloads (30-min session) |
 

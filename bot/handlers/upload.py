@@ -1,5 +1,6 @@
 """
-Upload handler — with duplicate detection and quota enforcement.
+Upload handler — with duplicate detection.
+Note: Storage quota removed; now using download quota system.
 """
 import logging
 from datetime import datetime, timedelta, timezone
@@ -10,7 +11,6 @@ from aiogram.types import Message
 from bot.config import settings
 from bot.database.connection import get_db
 from bot.database.repositories.file_repo import FileRepository
-from bot.database.repositories.quota_repo import QuotaRepository
 from bot.models.file_record import FileRecord
 from bot.utils.file_utils import detect_file_type, extract_file_info, format_size
 from bot.utils.keyboards import build_file_action_keyboard
@@ -41,7 +41,6 @@ async def handle_file_upload(message: Message, bot: Bot) -> None:
 
     db = get_db()
     file_repo = FileRepository(db)
-    quota_repo = QuotaRepository(db)
 
     # ── Extract metadata ──────────────────────────────────────────────────────
     filename, file_id, file_unique_id, file_size, mime_type = extract_file_info(message)
@@ -60,26 +59,6 @@ async def handle_file_upload(message: Message, bot: Bot) -> None:
             parse_mode="HTML",
         )
         return
-
-    # ── Feature 2: Quota enforcement (admins bypass) ───────────────────────────
-    effective_size = file_size or 0
-    allowed, quota = await quota_repo.can_upload(user.id, effective_size)
-    if not allowed and not is_admin(user.id):
-        await message.answer(
-            f"🚫 <b>Storage quota exceeded!</b>\n\n"
-            f"📦 Used: {format_size(quota.used_bytes)} / {format_size(quota.quota_bytes)}\n"
-            f"📁 Files: {quota.file_count}\n\n"
-            f"Delete some files with /list to free up space.",
-            parse_mode="HTML",
-        )
-        return
-
-    # Soft warning at 90%
-    if not quota.is_unlimited and quota.usage_percent >= 90:
-        await message.answer(
-            f"⚠️ You are using {quota.usage_percent:.0f}% of your quota "
-            f"({format_size(quota.remaining_bytes)} remaining)."
-        )
 
     # ── Copy to internal channel ──────────────────────────────────────────────
     processing_msg = await message.answer("⏳ Storing your file...")
@@ -125,7 +104,6 @@ async def handle_file_upload(message: Message, bot: Bot) -> None:
     # ── Save to MongoDB ───────────────────────────────────────────────────────
     try:
         record_id = await file_repo.insert(record)
-        await quota_repo.add_usage(user.id, effective_size)
     except Exception as exc:
         logger.exception("MongoDB insert failed: %s", exc)
         logger.error(

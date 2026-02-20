@@ -56,8 +56,10 @@ async def _deliver_file(
     """
     Shared delivery helper used by /get and callback 'get:'.
     Returns an error string or None on success.
+    Implements download quota enforcement.
     """
     repo = FileRepository(get_db())
+    quota_repo = QuotaRepository(get_db())
     record = await repo.get_by_id(record_id)
 
     if not record:
@@ -66,6 +68,29 @@ async def _deliver_file(
         # Check if requester is using a share code elsewhere — not here
         return "❌ You don't have permission to access this file."
 
+    # Check download quota (admins are exempt from enforcement)
+    file_size = record.file_size or 0
+    is_user_admin = is_admin(requesting_user_id)
+    allowed, quota, reason = await quota_repo.can_download(
+        requesting_user_id, file_size, is_user_admin
+    )
+    
+    if not allowed:
+        if reason == "bandwidth_exceeded":
+            return (
+                f"🚫 <b>Download quota exceeded!</b>\n\n"
+                f"📦 Bandwidth used: {format_size(quota.bandwidth_used)} / {format_size(quota.bandwidth_limit)}\n"
+                f"📊 Downloads today: {quota.download_count}\n\n"
+                f"Your quota will reset at midnight UTC."
+            )
+        elif reason == "download_count_exceeded":
+            return (
+                f"🚫 <b>Daily download limit reached!</b>\n\n"
+                f"📊 Downloads today: {quota.download_count} / {quota.download_limit}\n\n"
+                f"Your quota will reset at midnight UTC."
+            )
+        return f"🚫 Download not allowed: {reason}"
+
     try:
         await bot.copy_message(
             chat_id=chat_id,
@@ -73,6 +98,8 @@ async def _deliver_file(
             message_id=record.internal_message_id,
             caption=record.caption,
         )
+        # Track download usage (for both admins and regular users)
+        await quota_repo.add_download_usage(requesting_user_id, file_size)
     except Exception as exc:
         logger.exception("Delivery failed for record %s: %s", record_id, exc)
         return f"❌ Retrieval failed: <code>{type(exc).__name__}</code>"
@@ -312,10 +339,37 @@ async def cmd_claim(message: Message, bot: Bot) -> None:
 
     code = args[1].strip().upper()
     repo = FileRepository(get_db())
+    quota_repo = QuotaRepository(get_db())
     record = await repo.get_by_share_code(code)
 
     if not record:
         await message.answer("❌ Invalid or expired share code.")
+        return
+
+    user_id = message.from_user.id
+    file_size = record.file_size or 0
+    is_user_admin = is_admin(user_id)
+    
+    allowed, quota, reason = await quota_repo.can_download(user_id, file_size, is_user_admin)
+    if not allowed:
+        if reason == "bandwidth_exceeded":
+            await message.answer(
+                f"🚫 <b>Download quota exceeded!</b>\n\n"
+                f"📦 Bandwidth used: {format_size(quota.bandwidth_used)} / {format_size(quota.bandwidth_limit)}\n"
+                f"📊 Downloads today: {quota.download_count}\n\n"
+                f"Your quota will reset at midnight UTC.",
+                parse_mode="HTML",
+            )
+            return
+        elif reason == "download_count_exceeded":
+            await message.answer(
+                f"🚫 <b>Daily download limit reached!</b>\n\n"
+                f"📊 Downloads today: {quota.download_count} / {quota.download_limit}\n\n"
+                f"Your quota will reset at midnight UTC.",
+                parse_mode="HTML",
+            )
+            return
+        await message.answer(f"🚫 Download not allowed: {reason}", parse_mode="HTML")
         return
 
     try:
@@ -326,12 +380,13 @@ async def cmd_claim(message: Message, bot: Bot) -> None:
             caption=record.caption,
         )
         await repo.increment_share_uses(record.id)
+        await quota_repo.add_download_usage(user_id, file_size)
         await message.answer(
             f"✅ <b>File received!</b>\n"
             f"📄 {record.effective_name} (shared by @{record.username or 'anonymous'})",
             parse_mode="HTML",
         )
-        logger.info("User %s claimed file %s via code %s", message.from_user.id, record.id, code)
+        logger.info("User %s claimed file %s via code %s", user_id, record.id, code)
     except Exception as exc:
         logger.exception("Claim delivery failed: %s", exc)
         await message.answer(f"❌ Retrieval failed: <code>{type(exc).__name__}</code>", parse_mode="HTML")
@@ -498,7 +553,6 @@ async def cb_delete_do(callback: CallbackQuery) -> None:
     if record and record.user_id == callback.from_user.id:
         deleted = await file_repo.delete_by_id(record_id, callback.from_user.id)
         if deleted:
-            await quota_repo.remove_usage(callback.from_user.id, record.file_size or 0)
             await callback.message.edit_text(
                 f"🗑️ File <code>{record_id}</code> deleted.", parse_mode="HTML"
             )
@@ -523,22 +577,30 @@ async def cb_delete_cancel(callback: CallbackQuery) -> None:
 async def cmd_mystats(message: Message) -> None:
     quota_repo = QuotaRepository(get_db())
     quota = await quota_repo.get(message.from_user.id)
+    
+    await quota_repo.check_and_reset_if_needed(message.from_user.id)
+    quota = await quota_repo.get(message.from_user.id)
 
     bar_length = 20
     if quota.is_unlimited:
         bar = "∞ unlimited"
         pct_str = "Unlimited"
     else:
-        filled = int(quota.usage_percent / 100 * bar_length)
+        usage_percent = (quota.bandwidth_used / quota.bandwidth_limit) * 100
+        filled = int(usage_percent / 100 * bar_length)
         bar = "█" * filled + "░" * (bar_length - filled)
-        pct_str = f"{quota.usage_percent:.1f}%"
+        pct_str = f"{usage_percent:.1f}%"
+    
+    downloads_str = str(quota.download_count) if quota.download_limit == 0 else f"{quota.download_count} / {quota.download_limit}"
+    reset_str = quota.quota_reset_time.strftime('%Y-%m-%d %H:%M UTC') if quota.quota_reset_time else "Not set"
 
     await message.answer(
-        f"📊 <b>Your Storage Stats</b>\n\n"
-        f"Files stored: <b>{quota.file_count}</b>\n"
-        f"Space used:   <b>{format_size(quota.used_bytes)}</b>\n"
-        f"Quota:        <b>{'Unlimited' if quota.is_unlimited else format_size(quota.quota_bytes)}</b>\n\n"
-        f"[{bar}] {pct_str}",
+        f"📊 <b>Your Download Stats</b>\n\n"
+        f"📥 <b>Downloads today:</b> {downloads_str}\n"
+        f"📦 <b>Bandwidth used:</b> {format_size(quota.bandwidth_used)}\n"
+        f"📋 <b>Bandwidth limit:</b> {'Unlimited' if quota.is_unlimited else format_size(quota.bandwidth_limit)}\n\n"
+        f"[{bar}] {pct_str}\n\n"
+        f"⏰ <b>Resets at:</b> {reset_str}",
         parse_mode="HTML",
     )
 

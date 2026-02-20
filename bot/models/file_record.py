@@ -1,7 +1,7 @@
 """
 Pydantic models for all MongoDB documents.
 - FileRecord      : one stored file (enhanced with tags, expiry, share code)
-- UserQuotaRecord : tracks per-user storage usage
+- UserQuotaRecord : tracks per-user download quota
 - ShareCode       : maps a short code to a file record
 """
 from __future__ import annotations
@@ -86,15 +86,17 @@ class FileRecord(BaseModel):
 
 class UserQuotaRecord(BaseModel):
     """
-    Tracks a single user's storage consumption.
+    Tracks a single user's download quota.
     Collection: 'user_quotas'
     """
     id: Optional[PyObjectId] = Field(default=None, alias="_id")
 
     user_id: int
-    used_bytes: int = 0              # Running total
-    quota_bytes: int                 # Assigned limit (0 = unlimited)
-    file_count: int = 0
+    bandwidth_used: int = 0          # Total bandwidth used (bytes)
+    bandwidth_limit: int             # Bandwidth limit (0 = unlimited)
+    download_count: int = 0          # Number of downloads
+    download_limit: int = 0          # Download limit (0 = unlimited)
+    quota_reset_time: Optional[datetime] = None  # Next reset time
     download_token: Optional[str] = None  # Token required for non-admin downloads
     token_verified_until: Optional[datetime] = None  # Token verification expiry
     updated_at: datetime = Field(
@@ -105,19 +107,21 @@ class UserQuotaRecord(BaseModel):
 
     @property
     def is_unlimited(self) -> bool:
-        return self.quota_bytes == 0
+        return self.bandwidth_limit == 0
 
     @property
-    def remaining_bytes(self) -> int:
+    def bandwidth_remaining(self) -> float:
+        """Returns remaining bandwidth (inf if unlimited)."""
         if self.is_unlimited:
             return float("inf")
-        return max(0, self.quota_bytes - self.used_bytes)
+        return max(0, self.bandwidth_limit - self.bandwidth_used)
 
     @property
-    def usage_percent(self) -> float:
-        if self.is_unlimited or self.quota_bytes == 0:
-            return 0.0
-        return (self.used_bytes / self.quota_bytes) * 100
+    def downloads_remaining(self) -> float:
+        """Returns remaining downloads (inf if unlimited)."""
+        if self.download_limit == 0:
+            return float("inf")
+        return max(0, self.download_limit - self.download_count)
 
     def to_mongo(self) -> dict:
         data = self.model_dump(by_alias=True, exclude_none=True)

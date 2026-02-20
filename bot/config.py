@@ -44,6 +44,8 @@ class Settings(BaseSettings):
 
     # ── Quota ─────────────────────────────────────────────────────────────────
     default_quota_mb: int = 500       # Per-user default quota in MB (0 = unlimited)
+    default_bandwidth_limit_mb: int = 500  # Daily bandwidth limit per user in MB
+    default_download_limit: int = 0   # Daily download count limit (0 = unlimited)
 
     # ── Auto-Expiry ───────────────────────────────────────────────────────────
     default_expiry_days: int = 0      # 0 = never expires
