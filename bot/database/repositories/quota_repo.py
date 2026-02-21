@@ -189,8 +189,12 @@ class QuotaRepository:
             await self.reset_daily_quota(user_id)
             return True
             
+        # Ensure both datetimes are timezone-aware for comparison
+        reset_time = quota.quota_reset_time
+        if reset_time.tzinfo is None:
+            reset_time = reset_time.replace(tzinfo=timezone.utc)
         # Check if reset time has passed
-        if datetime.now(timezone.utc) >= quota.quota_reset_time:
+        if datetime.now(timezone.utc) >= reset_time:
             await self.reset_daily_quota(user_id)
             return True
             
